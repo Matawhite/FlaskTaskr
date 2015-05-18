@@ -1,115 +1,148 @@
-#import needed modules possible problem on line 3
-from flask import Flask, flash, redirect, render_template, request, session, url_for, g
+# project/views.py
 
+
+#################
+#### imports ####
+#################
+
+from forms import AddTaskForm, RegisterForm, LoginForm
+
+import datetime
 from functools import wraps
-from forms import AddTaskForm
-import sqlite3
-#leting app know where to find the config file
+from flask import Flask, flash, redirect, render_template, \
+    request, session, url_for
+from flask.ext.sqlalchemy import SQLAlchemy
+
+
+################
+#### config ####
+################
+
 app = Flask(__name__)
 app.config.from_object('config')
+db = SQLAlchemy(app)
 
-#function to connect to database
-def connect_db():
-	return sqlite3.connect(app.config['DATABASE'])
+from models import Task, User
 
-#login check
+
+##########################
+#### helper functions ####
+##########################
+
 def login_required(test):
-	@wraps(test)
-	def wrap(*args, **kwargs):
-		if 'logged_in' in session:
-			return test(*args, **kwargs)
-		else: 
-			flash('You need to login first.')
-			return redirect(url_for('login'))
-	return wrap #don't forget to line up your return with the start of this function.
+    @wraps(test)
+    def wrap(*args, **kwargs):
+        if 'logged_in' in session:
+            return test(*args, **kwargs)
+        else:
+            flash('You need to login first.')
+            return redirect(url_for('login'))
+    return wrap
 
-#logout
+
+########################
+#### route handlers ####
+########################
+
 @app.route('/logout/')
 def logout():
-	session.pop('logged_in', None)
-	flash('You are logged out. Bye : (')
-	return redirect(url_for('login'))
+    session.pop('logged_in', None)
+    session.pop('user_id', None)
+    flash('Goodbye!')
+    return redirect(url_for('login'))
 
-#login 
+
 @app.route('/', methods=['GET', 'POST'])
 def login():
-	if request.method == 'POST':
-		if request.form['username'] != app.config['USERNAME'] \
-			or request.form['password'] != app.config['PASSWORD']:
-			error = 'Invalid Credentials. Please try again.' #possible problem here
-			return render_template('login.html', error=error)
-		else:
-			session['logged_in'] = True
-			return redirect(url_for('tasks'))
-	if request.method == 'GET':
-		return render_template('login.html')
+    error = None
+    form = LoginForm(request.form)
+    if request.method == 'POST':
+        if form.validate_on_submit():
+            user = User.query.filter_by(name=request.form['name']).first()
+            if user is not None and user.password == request.form['password']:
+                session['logged_in'] = True
+                session['user_id'] = user.id
+                flash('Welcome!')
+                return redirect(url_for('tasks'))
+            else:
+                error = 'Invalid username or password.'
+        else:
+            error = 'Both fields are required.'
+    return render_template('login.html', form=form, error=error)
 
-#tasks route
-#this function queries the DB and returns due_date, priority, and task_id
+
+@app.route('/register/', methods=['GET', 'POST'])
+def register():
+    error = None
+    form = RegisterForm(request.form)
+    if request.method == 'POST':
+        if form.validate_on_submit():
+            new_user = User(
+                form.name.data,
+                form.email.data,
+                form.password.data,
+            )
+            db.session.add(new_user)
+            db.session.commit()
+            flash('Thanks for registering. Please login.')
+            return redirect(url_for('login'))
+    return render_template('register.html', form=form, error=error)
+
+
 @app.route('/tasks/')
 @login_required
 def tasks():
-	g.db = connect_db()
-	cur = g.db.execute('select name, due_date, priority, task_id from tasks where status=1')
-	#task unfinshed
-	open_tasks = [dict(name=row[0], due_date=row[1], priority=row[2], task_id=row[3]) for row in cur.fetchall()]
-	cur = g.db.execute('select name, due_date, priority, task_id from tasks where status=0')
-	#finished task
-	closed_tasks = [dict(name=row[0], due_date=row[1], priority=row[2], task_id=row[3]) for row in cur.fetchall()]
-	g.db.close()
-	return render_template(
-	'tasks.html',
-	form=AddTaskForm(request.form),
-	open_tasks=open_tasks,
-	closed_tasks=closed_tasks)
+    open_tasks = db.session.query(Task) \
+        .filter_by(status='1').order_by(Task.due_date.asc())
+    closed_tasks = db.session.query(Task) \
+        .filter_by(status='0').order_by(Task.due_date.asc())
+    return render_template(
+        'tasks.html',
+        form=AddTaskForm(request.form),
+        open_tasks=open_tasks,
+        closed_tasks=closed_tasks
+    )
 
-#add a new tasks
-@app.route('/add/', methods=['POST'])
+
+@app.route('/add/', methods=['GET', 'POST'])
 @login_required
 def new_task():
-	g.db = connect_db()
-	name = request.form['name']
-	date = request.form['due_date']
-	priority = request.form['priority']
-	if not name or not date or not priority:
-		flash("All fields are required. Please try again.")
-		return redirect(url_for('tasks'))
-	else:
-		g.db.execute('insert into tasks (name, due_date, priority, status) values (?, ? ,?, 1)',
-		[request.form['name'], request.form['due_date'], request.form['priority']])
-		g.db.commit()
-		g.db.close()
-		flash('New entry was successfully posted. Thanks.')
-		return redirect(url_for('tasks'))
+    form = AddTaskForm(request.form)
+    if request.method == 'POST':
+        if form.validate_on_submit():
+            new_task = Task(
+                form.name.data,
+                form.due_date.data,
+                form.priority.data,
+                datetime.datetime.utcnow(),
+                '1',
+                session['user_id']
+            )
+            db.session.add(new_task)
+            db.session.commit()
+            flash('New entry was successfully posted. Thanks.')
+            return redirect(url_for('tasks'))
+        else:
+            flash('All fields are required.')
+            return redirect(url_for('tasks'))
+    return render_template('tasks.html', form=form)
 
-#mark a task complete
+
 @app.route('/complete/<int:task_id>/')
 @login_required
 def complete(task_id):
-	g.db = connect_db()
-	g.db.execute (
-		'update tasks set status = 0 where task_id=' +str(task_id))
-	g.db.commit()
-	g.db.close()
-	flash('The task was mare as complete')
-	return redirect(url_for('tasks'))
+    new_id = task_id
+    db.session.query(Task).filter_by(task_id=new_id).update({"status": "0"})
+    db.session.commit()
+    flash('The task is complete. Nice.')
+    return redirect(url_for('tasks'))
 
-# Delete Tasks:
+
 @app.route('/delete/<int:task_id>/')
 @login_required
 def delete_entry(task_id):
-	g.db = connect_db()
-	g.db.execute('delete from tasks where task_id='+str(task_id))
-	g.db.commit()
-	g.db.close()
-	flash('The task was deleted.')
-	return redirect(url_for('tasks'))
-	
-
-
-
-
-
-
-		
-
+    new_id = task_id
+    db.session.query(Task).filter_by(task_id=new_id).delete()
+    db.session.commit()
+    flash('The task was deleted. Why not add a new one?')
+    return redirect(url_for('tasks'))
